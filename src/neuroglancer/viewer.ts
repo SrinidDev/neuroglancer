@@ -828,7 +828,7 @@ export class Viewer extends RefCounted implements ViewerState {
       history.replaceState(null, '', removeParameterFromUrl(window.location.href, 'json_url'));
 
       this.resetStateWhenEmpty = false;
-      StatusMessage
+      return StatusMessage
           .forPromise(
               authFetch(json_url).then(res => res.json()).then(response => {
                 this.state.restoreState(response);
@@ -844,6 +844,8 @@ export class Viewer extends RefCounted implements ViewerState {
           .finally(() => {
             this.resetStateWhenEmpty = true;
           });
+    } else {
+      return Promise.resolve();
     }
   }
 
