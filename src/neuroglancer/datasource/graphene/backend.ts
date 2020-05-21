@@ -20,7 +20,7 @@ import {authFetch as cancellableFetchOk, responseIdentity} from 'neuroglancer/au
 import {Chunk, ChunkManager, WithParameters} from 'neuroglancer/chunk_manager/backend';
 import {GenericSharedDataSource} from 'neuroglancer/chunk_manager/generic_file_source';
 import {ChunkedGraphSourceParameters, DataEncoding, MeshSourceParameters, ShardingHashFunction, ShardingParameters, SkeletonSourceParameters, VolumeChunkEncoding, VolumeChunkSourceParameters} from 'neuroglancer/datasource/graphene/base';
-import {assignMeshFragmentData, decodeJsonManifestChunk, decodeTriangleVertexPositionsAndIndices, decodeTriangleVertexPositionsAndIndicesDraco, FragmentChunk, ManifestChunk, MeshSource} from 'neuroglancer/mesh/backend';
+import {assignMeshFragmentData, decodeTriangleVertexPositionsAndIndices, decodeTriangleVertexPositionsAndIndicesDraco, FragmentChunk, ManifestChunk, MeshSource, FragmentId} from 'neuroglancer/mesh/backend';
 import {SkeletonChunk, SkeletonSource} from 'neuroglancer/skeleton/backend';
 import {decodeSkeletonChunk} from 'neuroglancer/skeleton/decode_precomputed_skeleton';
 import {ChunkDecoder} from 'neuroglancer/sliceview/backend_chunk_decoders';
@@ -35,9 +35,8 @@ import {Borrowed} from 'neuroglancer/util/disposable';
 import {convertEndian32, Endianness} from 'neuroglancer/util/endian';
 import {murmurHash3_x86_128Hash64Bits} from 'neuroglancer/util/hash';
 import {responseArrayBuffer, responseJson} from 'neuroglancer/util/http_request';
-import {stableStringify} from 'neuroglancer/util/json';
+import {verifyObject, verifyObjectProperty, stableStringify, verifyStringArray} from 'neuroglancer/util/json';
 import {Uint64} from 'neuroglancer/util/uint64';
-import {encodeZIndexCompressed} from 'neuroglancer/util/zorder';
 import {registerSharedObject} from 'neuroglancer/worker_rpc';
 
 const DracoLoader = require('dracoloader');
@@ -221,70 +220,28 @@ chunkDecoders.set(VolumeChunkEncoding.RAW, decodeRawChunk);
 chunkDecoders.set(VolumeChunkEncoding.JPEG, decodeJpegChunk);
 chunkDecoders.set(VolumeChunkEncoding.COMPRESSED_SEGMENTATION, decodeCompressedSegmentationChunk);
 
+
 @registerSharedObject() export class GrapheneVolumeChunkSource extends
 (WithParameters(VolumeChunkSource, VolumeChunkSourceParameters)) {
-  // chunkDecoder = chunkDecoders.get(this.parameters.encoding)!;
-  // async download(chunk: VolumeChunk, cancellationToken: CancellationToken) {
-  //   const {parameters} = this;
-  //   let url: string;
-  //   {
-  //     // chunkPosition must not be captured, since it will be invalidated by the next call to
-  //     // computeChunkBounds.
-  //     let chunkPosition = this.computeChunkBounds(chunk);
-  //     let chunkDataSize = chunk.chunkDataSize!;
-  //     url = `${parameters.url}/${chunkPosition[0]}-${chunkPosition[0] + chunkDataSize[0]}_` +
-  //         `${chunkPosition[1]}-${chunkPosition[1] + chunkDataSize[1]}_` +
-  //         `${chunkPosition[2]}-${chunkPosition[2] + chunkDataSize[2]}`;
-  //   }
-  //   const response = await cancellableFetchOk(url, {}, responseArrayBuffer, cancellationToken);
-  //   await this.chunkDecoder(chunk, cancellationToken, response);
-  // }
-
   chunkDecoder = chunkDecoders.get(this.parameters.encoding)!;
-  private minishardIndexSource = getMinishardIndexDataSource(this.chunkManager, this.parameters);
 
-  gridShape = (() => {
-    const gridShape = new Uint32Array(3);
-    const {upperVoxelBound, chunkDataSize} = this.spec;
-    for (let i = 0; i < 3; ++i) {
-      gridShape[i] = Math.ceil(upperVoxelBound[i] / chunkDataSize[i]);
-    }
-    return gridShape;
-  })();
-
-  async download(chunk: VolumeChunk, cancellationToken: CancellationToken): Promise<void> {
+  async download(chunk: VolumeChunk, cancellationToken: CancellationToken) {
     const {parameters} = this;
-
-    const {minishardIndexSource} = this;
-    let response: ArrayBuffer;
-    if (minishardIndexSource === undefined) {
-      let url: string;
-      {
-        // chunkPosition must not be captured, since it will be invalidated by the next call to
-        // computeChunkBounds.
-        let chunkPosition = this.computeChunkBounds(chunk);
-        let chunkDataSize = chunk.chunkDataSize!;
-        url = `${parameters.url}/${chunkPosition[0]}-${chunkPosition[0] + chunkDataSize[0]}_` +
-            `${chunkPosition[1]}-${chunkPosition[1] + chunkDataSize[1]}_` +
-            `${chunkPosition[2]}-${chunkPosition[2] + chunkDataSize[2]}`;
-      }
-      response = await cancellableFetchOk(url, {}, responseArrayBuffer, cancellationToken);
-    } else {
-      this.computeChunkBounds(chunk);
-      const {gridShape} = this;
-      const {chunkGridPosition} = chunk;
-      const xBits = Math.ceil(Math.log2(gridShape[0])), yBits = Math.ceil(Math.log2(gridShape[1])),
-            zBits = Math.ceil(Math.log2(gridShape[2]));
-      const chunkIndex = encodeZIndexCompressed(
-          new Uint64(), xBits, yBits, zBits, chunkGridPosition[0], chunkGridPosition[1],
-          chunkGridPosition[2]);
-      response =
-          (await getShardedData(minishardIndexSource, chunk, chunkIndex, cancellationToken)).data;
+    let url: string;
+    {
+      // chunkPosition must not be captured, since it will be invalidated by the next call to
+      // computeChunkBounds.
+      let chunkPosition = this.computeChunkBounds(chunk);
+      let chunkDataSize = chunk.chunkDataSize!;
+      url = `${parameters.url}/${chunkPosition[0]}-${chunkPosition[0] + chunkDataSize[0]}_` +
+          `${chunkPosition[1]}-${chunkPosition[1] + chunkDataSize[1]}_` +
+          `${chunkPosition[2]}-${chunkPosition[2] + chunkDataSize[2]}`;
     }
+    const response = await cancellableFetchOk(url, {}, responseArrayBuffer, cancellationToken);
     await this.chunkDecoder(chunk, cancellationToken, response);
-  }  
-
+  }
 }
+
 
 export function decodeChunkedGraphChunk(
     chunk: ChunkedGraphChunk, rootObjectKey: string, response: Response) {
@@ -335,7 +292,15 @@ export function decodeChunkedGraphChunk(
 }
 
 export function decodeManifestChunk(chunk: ManifestChunk, response: any) {
-  return decodeJsonManifestChunk(chunk, response, 'fragments');
+  // return decodeJsonManifestChunk(chunk, response, 'fragments');
+  verifyObject(response);
+  // chunk.fragmentIds = verifyObjectProperty(response, keysPropertyName, verifyStringArray);
+  if (chunk.fragmentIds === undefined || chunk.fragmentIds === null){
+    chunk.fragmentIds = [] as FragmentId[];
+  }
+  chunk.fragmentIds = chunk.fragmentIds!.concat(
+    verifyObjectProperty(response, 'fragments', verifyStringArray)
+  );
 }
 
 export function decodeFragmentChunk(chunk: FragmentChunk, response: ArrayBuffer) {
@@ -355,10 +320,23 @@ export function decodeDracoFragmentChunk(
 
 @registerSharedObject() export class GrapheneMeshSource extends
 (WithParameters(MeshSource, MeshSourceParameters)) {
+  socketClient = require('socket.io-client')('http://localhost:4000');
   download(chunk: ManifestChunk, cancellationToken: CancellationToken) {
-    const {parameters} = this;
+    const {parameters, socketClient} = this;
+    socketClient.emit('manifest', `${chunk.objectId}`);
+    socketClient.on('manifest', function(message: Object) {
+      console.log(message)
+      if (typeof message === 'object') {
+        decodeManifestChunk(chunk, message);
+        chunk.downloadSucceeded();
+      }
+      if (message === 'end') {
+        socketClient.disconnect();
+      }
+    });
+
     return cancellableFetchOk(
-               `${parameters.manifestUrl}/manifest/${chunk.objectId}:${parameters.lod}?verify=True`,
+               `${parameters.manifestUrl}/manifest/0:${parameters.lod}?verify=True`,
                {}, responseJson, cancellationToken)
         .then(response => decodeManifestChunk(chunk, response));
   }
@@ -411,7 +389,6 @@ export function decodeDracoFragmentChunk(
 }
 
 
-
 // @registerSharedObject() //
 // export class GrapheneShardedMeshSource extends
 // (WithParameters(MeshSource, MeshSourceParameters)) {
@@ -448,6 +425,20 @@ export function decodeDracoFragmentChunk(
 //         });
 //   }
 // }
+
+
+// const io = require('socket.io-client');
+// var client = io('http://localhost:4000');
+// client.on('connect', function() {
+//   client.emit('manifest', '864691135642762520');
+// });
+
+// client.on('manifest', function(message: Object) {
+//   console.log(message)
+//   if (message === 'end') {
+//     client.disconnect()
+//   }
+// });
 
 
 
